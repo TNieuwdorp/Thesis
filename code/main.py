@@ -1,130 +1,112 @@
-import datetime
-import time
-from collections import deque
-
 import gym
-import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-from scipy.signal import savgol_filter
 
-'''
-Exploration function
-'''
-
-
-def sampleAction(observation, iteration_no, iteration_max):
-    # TODO: best possible action
-
-    sampled_action = sess.run(output,{observation = observation}
-
-    # TODO: Softmax policy
-
-    # TODO: epsilon-greedy
-
-    # TODO: epsilon as function of time
-
-    # TODO: random
-    output = env.observation_space.sample()
-
-    return output
-
-
-'''
-Policy net
-'''
-
-
-def value_gradient(environment_num_observations, environment_num_actions):
-    '''
-    Creates and runs an inference net that calculates a possible outcome
-    :param environment_num_observations: Number of input layer neurons
-    :param environment_num_actions: Number of output layer neurons
-    :return: output of the net
-    '''
-    # TODO: tanh vs ReLU vs leaky ReLU
-    observation = tf.placeholder("float", [None,environment_num_observations])
-    hidden = slim.fully_connected(observation, int(np.mean(observation.get_shape[0], environment_num_actions)),
-                                  scope="hidden")
-    output = slim.fully_connected(hidden, environment_num_actions, activation_fn=tf.nn.softmax, scope="output")
-
-    newvals = tf.placeholder("float", [None, 1])
-    diff = output - newvals
-    loss = tf.nn.l2_loss(diff)
-    optimizer = tf.train.AdamOptimizer(0.1).minimize(loss)
-
-
-'''
-Initialize plot, environment and TensorFlow
-'''
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
-
-plt.ion()
-plt.axes()
-
-sess = tf.Session()
 tf.reset_default_graph()
-init = tf.initialize_all_variables()
+
+# Parameters
+env = gym.make('CartPole-v0')
+gamma = 0.9
+lr = 0.01
+input_size = env.observation_space.shape[0]
+output_size = env.action_space.n
+hidden_size = int(np.ceil(np.mean([input_size, output_size])))
+max_episodes = 5000  # Set total number of episodes to train agent on.
+max_steps = 200
+batch_size = 5
+
+def discount_rewards(r):
+    """ take 1D float array of rewards and compute discounted reward """
+    discounted_r = np.zeros_like(r)
+    running_add = 0
+    for t in reversed(range(0, r.size)):
+        running_add = running_add * gamma + r[t]
+        discounted_r[t] = running_add
+    return discounted_r
+
+
+'''
+# Define the agent
+'''
+# These lines established the feed-forward part of the network. The agent takes a state and produces an action.
+state_in = tf.placeholder(shape=[None, input_size], dtype=tf.float32)
+hidden = slim.fully_connected(state_in, hidden_size, activation_fn=tf.nn.relu)  # TODO: Add bias
+output = slim.fully_connected(hidden, output_size, activation_fn=tf.nn.softmax, biases_initializer=None)
+chosen_action = tf.argmax(output, 1)  # TODO: Build different strategies
+
+# The next six lines establish the training procedure. We feed the reward and chosen action into the network
+# to compute the loss, and use it to update the network.
+reward_holder = tf.placeholder(shape=[None], dtype=tf.float32)
+action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
+
+indexes = tf.range(0, tf.shape(output)[0]) * tf.shape(output)[1] + action_holder
+responsible_outputs = tf.gather(tf.reshape(output, [-1]), indexes)
+
+loss = -tf.reduce_mean(tf.log(responsible_outputs) * reward_holder)
+
+tvars = tf.trainable_variables()
+gradient_holders = []
+for idx, var in enumerate(tvars):
+    placeholder = tf.placeholder(tf.float32, name=str(idx) + '_holder')
+    gradient_holders.append(placeholder)
+
+gradients = tf.gradients(loss, tvars)
+
+optimizer = tf.train.AdamOptimizer(learning_rate=lr)
+update_batch = optimizer.apply_gradients(zip(gradient_holders, tvars))
+
+init = tf.global_variables_initializer()
+
+# Launch the TensorFlow graph
+sess = tf.Session()
 sess.run(init)
+i = 0
+total_reward = []
+total_length = []
 
-state_dim = env.observation_space.shape[0]
-num_actions = env.action_space.n
+# Initialize gradient buffer with zero
+gradBuffer = sess.run(tvars)
+for ix, grad in enumerate(gradBuffer):
+    gradBuffer[ix] = 0
 
-MAX_EPISODES = 10000
-MAX_STEPS = 200
+while i < max_episodes:
+    s = env.reset()
+    running_reward = 0
+    ep_history = []
+    for step in range(max_steps):
+        # Choose either a random action or one from our network.
+        a_dist = sess.run(output, feed_dict={state_in: [s]})
+        a = np.random.choice(a_dist[0], p=a_dist[0])
+        a = np.argmax(a_dist == a)
 
-episode_history = deque(maxlen=100)
-start = time.time()
-scores = [0]
-episode_data = []
-for i_episode in range(MAX_EPISODES):
-    # initialize
-    state = env.reset()
-    total_rewards = 0
+        s1, r, d, _ = env.step(a)  # Get our reward for taking an action given a bandit.
+        ep_history.append([s, a, r, s1])
+        s = s1
+        running_reward += r
+        if d:
+            # Update the network.
+            ep_history = np.array(ep_history)
+            ep_history[:, 2] = discount_rewards(ep_history[:, 2])
+            feed_dict = {reward_holder: ep_history[:, 2],
+                         action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
+            grads = sess.run(gradients, feed_dict=feed_dict)
+            for idx, grad in enumerate(grads):
+                gradBuffer[idx] += grad
 
-    for t in range(MAX_STEPS):
-        # TODO: Pick action
-        action = env.action_space.sample()
+            if i % batch_size == 0 and i != 0:
+                feed_dict = dictionary = dict(zip(gradient_holders, gradBuffer))
+                _ = sess.run(update_batch, feed_dict=feed_dict)
+                for ix, grad in enumerate(gradBuffer):
+                    gradBuffer[ix] = grad * 0
 
-        next_state, reward, done, _ = env.step(action)
-        total_rewards += reward
-        episode_data.append((state, action, reward))
-        state = next_state
-        if done:
-            # TODO: Calculate discounted rewards, replace immediate rewards with long-term reward
+            total_reward.append(running_reward)
+            total_length.append(step)
             break
+        if i % 100 == 0:
+            env.render()
 
-    # TODO: Discount rewards
-
-
-
-    # TODO: Calculate gradient
-    # TODO: Execute gradient update
-    optimizer = tf.train.AdamOptimizer(0.01).compute_gradients()
-
-    episode_history.append(total_rewards)
-    mean_rewards = np.mean(episode_history)
-    scores.append(mean_rewards)
-    if i_episode % 100 == 1:
-        plt.clf()
-        plt.plot(scores, color='b')
-        if len(scores) > 3:
-            yhat = savgol_filter(scores, len(scores), 4)
-            plt.plot(yhat, linewidth=2, color='r')
-        plt.pause(1e-30)
-        print("Episode {}".format(i_episode))
-        print("Time elapsed: {}".format(datetime.timedelta(seconds=time.time() - start)))
-        print("Average reward for last 100 episodes: {}".format(mean_rewards))
-    if mean_rewards >= 195.0 and len(episode_history) >= 100:
-        print("Environment {} solved after {} episodes".format(env_name, i_episode + 1))
-        plt.clf()
-        plt.plot(scores, color='b')
-        if len(scores) % 2 == 0:
-            yhat = savgol_filter(scores[0:-1], len(scores) - 1, 4)
-        else:
-            yhat = savgol_filter(scores, len(scores), 3)
-        plt.plot(yhat, linewidth=2, color='r')
-        plt.waitforbuttonpress()
-        break
+    # Update our running tally of scores.
+    if i % 100 == 0:
+        print(np.mean(total_reward[-100:]))
+    i += 1
