@@ -1,101 +1,155 @@
-from __future__ import print_function
-
-import datetime
-import time
-import matplotlib.pyplot as plt
-from collections import deque
-
 import gym
+import time
 import numpy as np
 import tensorflow as tf
-from agent import PolicyGradientREINFORCE
-from scipy.signal import savgol_filter
+import tensorflow.contrib.slim as slim
+
+tf.reset_default_graph()
+
+# Parameters
+env = gym.make('CartPole-v0')
+gamma = 0.99
+lr = 0.1
+input_size = env.observation_space.shape[0]
+output_size = env.action_space.n
+hidden_size = 10
+max_episodes = -1  # Set total number of episodes to train agent on.
+max_steps = 1000
+batch_size = 15
+strategy = 3
+# 1: Argmax
+# 2: Softmax
+# 3: Epsilon-greedy
+# 4: Decaying epsilon-greedy
+# else: Random
+
+
+def discount_rewards(r):
+    """ take 1D float array of rewards and compute discounted reward """
+    discounted_r = np.zeros_like(r)
+    running_add = 0
+    for t in reversed(range(0, r.size)):
+        running_add = running_add * gamma + r[t]
+        discounted_r[t] = running_add
+    return discounted_r
+
+
+def leaky_relu(x, alpha=0.01):
+    """Leaky ReLU."""
+    return tf.maximum(alpha * x, x)
 
 
 '''
-Initialize plot, environment and TensorFlow
+# Define the agent
 '''
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
+# These lines established the feed-forward part of the network. The agent takes a state and produces an action.
+state_in = tf.placeholder(shape=[None, input_size], dtype=tf.float32)
+hidden = slim.fully_connected(state_in, hidden_size, activation_fn=leaky_relu)
+output = slim.fully_connected(hidden, output_size, activation_fn=tf.nn.softmax,
+                              biases_initializer=None)
 
-plt.ion()
-plt.axes()
 
+# The next six lines establish the training procedure. We feed the reward and chosen action into the network
+# to compute the loss, and use it to update the network.
+reward_holder = tf.placeholder(shape=[None], dtype=tf.float32)
+action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
+
+indexes = tf.range(0, tf.shape(output)[0]) * tf.shape(output)[1] + action_holder
+responsible_outputs = tf.gather(tf.reshape(output, [-1]), indexes)
+
+loss = -tf.reduce_mean(tf.log(responsible_outputs) * reward_holder)
+
+tvars = tf.trainable_variables()
+gradient_holders = []
+for idx, var in enumerate(tvars):
+    placeholder = tf.placeholder(tf.float32, name=str(idx) + '_holder')
+    gradient_holders.append(placeholder)
+
+gradients = tf.gradients(loss, tvars)
+
+optimizer = tf.train.AdamOptimizer(learning_rate=lr)
+update_batch = optimizer.apply_gradients(zip(gradient_holders, tvars))
+
+init = tf.global_variables_initializer()
+
+# Launch the TensorFlow graph
 sess = tf.Session()
-optimizer = tf.train.RMSPropOptimizer(learning_rate=0.0001, decay=0.9)
-writer = tf.summary.FileWriter("/tmp/{}-experiment-1".format(env_name))
+sess.run(init)
+i = 0
+total_reward = []
+total_length = []
+timer = time.time()
+show_result = False
 
-state_dim = env.observation_space.shape[0]
-num_actions = env.action_space.n
+# Initialize gradient buffer with zero
+gradBuffer = sess.run(tvars)
+for ix, grad in enumerate(gradBuffer):
+    gradBuffer[ix] = 0
 
-def policy_network(states):
-  # define policy neural network
-  W1 = tf.get_variable("W1", [state_dim, 20],
-                       initializer=tf.random_normal_initializer())
-  b1 = tf.get_variable("b1", [20],
-                       initializer=tf.constant_initializer(0))
-  h1 = tf.nn.tanh(tf.matmul(states, W1) + b1)
-  W2 = tf.get_variable("W2", [20, num_actions],
-                       initializer=tf.random_normal_initializer(stddev=0.1))
-  b2 = tf.get_variable("b2", [num_actions],
-                       initializer=tf.constant_initializer(0))
-  p = tf.matmul(h1, W2) + b2
-  return p
+while i != max_episodes:
+    if time.time() - timer > 5:
+        timer = time.time()
+        show_result = True
+    s = env.reset()
+    running_reward = 0
+    ep_history = []
+    for step in range(max_steps):
+        # Choose either a random action or one from our network.
+        a_dist = sess.run(output, feed_dict={state_in: [s]})
+        a = np.random.choice(a_dist[0], p=a_dist[0])
+        a = np.argmax(a_dist == a)
+        '''
+        if strategy == 1:
+            # Argmax
+            a = tf.argmax(output, 1)
+        elif strategy == 2:
+            # Softmax policy
+            a = np.random.choice(env.action_space, p=output)
+        elif strategy == 3:
+            # epsilon-greedy
+            if np.random.uniform(0, 1) < 0.8:
+                a = tf.argmax(output, 1)
+            else:
+                a = env.action_space.sample()
+        elif strategy == 4:
+            # decaying epsilon-greedy
+            if np.random.uniform(0, 1) < 1:
+                a = tf.argmax(output, 1)
+            else:
+                a = env.action_space.sample()
+        else:
+            # Random
+            a = env.observation_space.sample()
+        '''
+        s1, r, d, _ = env.step(a)  # Get our reward for taking an action given a bandit.
+        ep_history.append([s, a, r, s1])
+        s = s1
+        running_reward += r
+        if d:
+            # Update the network.
+            ep_history = np.array(ep_history)
+            ep_history[:, 2] = discount_rewards(ep_history[:, 2])
+            feed_dict = {reward_holder: ep_history[:, 2],
+                         action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
+            grads = sess.run(gradients, feed_dict=feed_dict)
+            for idx, grad in enumerate(grads):
+                gradBuffer[idx] += grad
 
-pg_reinforce = PolicyGradientREINFORCE(sess,
-                                       optimizer,
-                                       policy_network,
-                                       state_dim,
-                                       num_actions,
-                                       summary_writer=writer)
+            if i % batch_size == 0 and i != 0:
+                # Average buffer over batch size
+                gradBuffer[:] = [x / batch_size for x in gradBuffer]
+                feed_dict = dict(zip(gradient_holders, gradBuffer))
+                _ = sess.run(update_batch, feed_dict=feed_dict)
+                for ix, grad in enumerate(gradBuffer):
+                    gradBuffer[ix] = grad * 0
 
-MAX_EPISODES = 10000
-MAX_STEPS    = 200
+            total_reward.append(running_reward)
+            break
+        if show_result:
+            env.render()
 
-episode_history = deque(maxlen=100)
-start = time.time()
-scores = [0]
-for i_episode in range(MAX_EPISODES):
-
-  # initialize
-  state = env.reset()
-  total_rewards = 0
-
-  for t in range(MAX_STEPS):
-    # env.render()
-    action = pg_reinforce.sampleAction(state[np.newaxis,:])
-    next_state, reward, done, _ = env.step(action)
-
-    total_rewards += reward
-    reward = -10 if done else 0.1 # normalize reward
-    pg_reinforce.storeRollout(state, action, reward)
-
-    state = next_state
-    if done: break
-
-  pg_reinforce.updateModel()
-
-  episode_history.append(total_rewards)
-  mean_rewards = np.mean(episode_history)
-  scores.append(mean_rewards)
-  if i_episode % 100 == 1:
-      plt.clf()
-      plt.plot(scores, color='b')
-      if len(scores) > 3:
-        yhat = savgol_filter(scores, len(scores), 4)
-        plt.plot(yhat, linewidth=2, color='r')
-      plt.pause(1e-30)
-      print("Episode {}".format(i_episode))
-      print("Time elapsed: {}".format(datetime.timedelta(seconds=time.time() - start)))
-      print("Average reward for last 100 episodes: {}".format(mean_rewards))
-  if mean_rewards >= 195.0 and len(episode_history) >= 100:
-    print("Environment {} solved after {} episodes".format(env_name, i_episode+1))
-    plt.clf()
-    plt.plot(scores, color='b')
-    if len(scores) % 2 == 0:
-        yhat = savgol_filter(scores[0:-1], len(scores)-1, 4)
-    else:
-        yhat = savgol_filter(scores, len(scores), 3)
-    plt.plot(yhat, linewidth=2, color='r')
-    plt.waitforbuttonpress()
-    break
+    # Update our running tally of scores.
+    if show_result:
+        print("Iteration " + str(i) + ": " + str(np.mean(total_reward[-100:])))
+        show_result = False
+    i += 1
