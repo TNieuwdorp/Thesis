@@ -1,4 +1,5 @@
 import gym
+import time
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -7,14 +8,21 @@ tf.reset_default_graph()
 
 # Parameters
 env = gym.make('CartPole-v0')
-gamma = 0.9
-lr = 0.01
+gamma = 0.99
+lr = 0.1
 input_size = env.observation_space.shape[0]
 output_size = env.action_space.n
-hidden_size = int(np.ceil(np.mean([input_size, output_size])))
-max_episodes = 5000  # Set total number of episodes to train agent on.
-max_steps = 200
-batch_size = 5
+hidden_size = 10
+max_episodes = -1  # Set total number of episodes to train agent on.
+max_steps = 1000
+batch_size = 15
+strategy = 3
+# 1: Argmax
+# 2: Softmax
+# 3: Epsilon-greedy
+# 4: Decaying epsilon-greedy
+# else: Random
+
 
 def discount_rewards(r):
     """ take 1D float array of rewards and compute discounted reward """
@@ -26,14 +34,20 @@ def discount_rewards(r):
     return discounted_r
 
 
+def leaky_relu(x, alpha=0.01):
+    """Leaky ReLU."""
+    return tf.maximum(alpha * x, x)
+
+
 '''
 # Define the agent
 '''
 # These lines established the feed-forward part of the network. The agent takes a state and produces an action.
 state_in = tf.placeholder(shape=[None, input_size], dtype=tf.float32)
-hidden = slim.fully_connected(state_in, hidden_size, activation_fn=tf.nn.relu)  # TODO: Add bias
-output = slim.fully_connected(hidden, output_size, activation_fn=tf.nn.softmax, biases_initializer=None)
-chosen_action = tf.argmax(output, 1)  # TODO: Build different strategies
+hidden = slim.fully_connected(state_in, hidden_size, activation_fn=leaky_relu)
+output = slim.fully_connected(hidden, output_size, activation_fn=tf.nn.softmax,
+                              biases_initializer=None)
+
 
 # The next six lines establish the training procedure. We feed the reward and chosen action into the network
 # to compute the loss, and use it to update the network.
@@ -64,13 +78,18 @@ sess.run(init)
 i = 0
 total_reward = []
 total_length = []
+timer = time.time()
+show_result = False
 
 # Initialize gradient buffer with zero
 gradBuffer = sess.run(tvars)
 for ix, grad in enumerate(gradBuffer):
     gradBuffer[ix] = 0
 
-while i < max_episodes:
+while i != max_episodes:
+    if time.time() - timer > 5:
+        timer = time.time()
+        show_result = True
     s = env.reset()
     running_reward = 0
     ep_history = []
@@ -79,7 +98,29 @@ while i < max_episodes:
         a_dist = sess.run(output, feed_dict={state_in: [s]})
         a = np.random.choice(a_dist[0], p=a_dist[0])
         a = np.argmax(a_dist == a)
-
+        '''
+        if strategy == 1:
+            # Argmax
+            a = tf.argmax(output, 1)
+        elif strategy == 2:
+            # Softmax policy
+            a = np.random.choice(env.action_space, p=output)
+        elif strategy == 3:
+            # epsilon-greedy
+            if np.random.uniform(0, 1) < 0.8:
+                a = tf.argmax(output, 1)
+            else:
+                a = env.action_space.sample()
+        elif strategy == 4:
+            # decaying epsilon-greedy
+            if np.random.uniform(0, 1) < 1:
+                a = tf.argmax(output, 1)
+            else:
+                a = env.action_space.sample()
+        else:
+            # Random
+            a = env.observation_space.sample()
+        '''
         s1, r, d, _ = env.step(a)  # Get our reward for taking an action given a bandit.
         ep_history.append([s, a, r, s1])
         s = s1
@@ -95,18 +136,20 @@ while i < max_episodes:
                 gradBuffer[idx] += grad
 
             if i % batch_size == 0 and i != 0:
-                feed_dict = dictionary = dict(zip(gradient_holders, gradBuffer))
+                # Average buffer over batch size
+                gradBuffer[:] = [x / batch_size for x in gradBuffer]
+                feed_dict = dict(zip(gradient_holders, gradBuffer))
                 _ = sess.run(update_batch, feed_dict=feed_dict)
                 for ix, grad in enumerate(gradBuffer):
                     gradBuffer[ix] = grad * 0
 
             total_reward.append(running_reward)
-            total_length.append(step)
             break
-        if i % 100 == 0:
+        if show_result:
             env.render()
 
     # Update our running tally of scores.
-    if i % 100 == 0:
-        print(np.mean(total_reward[-100:]))
+    if show_result:
+        print("Iteration " + str(i) + ": " + str(np.mean(total_reward[-100:])))
+        show_result = False
     i += 1
