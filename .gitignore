@@ -62,3 +62,5 @@ target/
 pip-selfcheck\.json
 
 bin/
+
+share/*
