@@ -1,9 +1,11 @@
-from enum import Enum
-import gym
 import time
+from enum import Enum
+
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+
+import gym
 
 
 class Strategy(Enum):
@@ -28,12 +30,13 @@ def leaky_relu(x, alpha=0.01):
     """Leaky ReLU."""
     return tf.maximum(alpha * x, x)
 
+
 # Parameters
 env = gym.make('CartPole-v0')
 input_size = env.observation_space.shape[0]
 output_size = env.action_space.n
 
-report_every_s = 10
+report_every_s = 5
 
 max_episodes = 9223372036854775807  # Set total number of episodes to train agent on.
 max_steps = 1000
@@ -42,7 +45,7 @@ gamma = 0.99
 lr = 0.05
 hidden_size = 10
 batch_size = 10
-strategy = Strategy.ARGMAX
+strategy = Strategy.E_GREEDY
 
 '''
 # Define the neural net agent
@@ -102,31 +105,31 @@ for i in range(max_episodes):
     running_reward = 0
     ep_history = []
     for step in range(max_steps):
-        # Choose either a random action or one from our network.
-        net_a_dist = sess.run(output, feed_dict={state_in: [s]})
+        # Choose an action (depends on exploration strategy)
+        net_a_dist = sess.run(output, feed_dict={state_in: [s]}).flatten()
 
         if strategy == Strategy.ARGMAX:
-            a = tf.argmax(net_a_dist.flatten()) #TODO:ValueError: None values not supported.
+            a = np.argmax(net_a_dist)  # TODO:ValueError: None values not supported.
         elif strategy == Strategy.SOFTMAX:
             # Softmax policy
-            a = np.random.choice(env.action_space, p=net_a_dist)
+            a = np.random.choice([0, 1], p=net_a_dist)
         elif strategy == 3:
             # epsilon-greedy
-            if np.random.uniform(0, 1) < 0.8:
-                a = tf.argmax(output, 1)
-            else:
+            if np.random.uniform(0, 1) < 0.2:
                 a = env.action_space.sample()
+            else:
+                a = np.argmax(net_a_dist)
         elif strategy == 4:
             # decaying epsilon-greedy
             if np.random.uniform(0, 1) < 1:
-                a = tf.argmax(output, 1)
-            else:
                 a = env.action_space.sample()
+            else:
+                a = tf.argmax(output, 1)
         else:
             # Random
-            a = env.observation_space.sample()
+            a = env.action_space.sample()
 
-        s1, r, d, _ = env.step(a)  # Get our reward for taking an action given a bandit.
+        s1, r, d, _ = env.step(a)
         ep_history.append([s, a, r, s1])
         s = s1
         running_reward += r
