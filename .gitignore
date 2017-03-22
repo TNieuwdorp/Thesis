@@ -64,3 +64,6 @@ pip-selfcheck\.json
 bin/
 
 share/*
+gym/
+include/
+pyvenv.cfg
