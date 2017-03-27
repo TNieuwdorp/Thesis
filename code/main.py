@@ -1,6 +1,7 @@
 import time
 from enum import Enum
-
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -11,11 +12,11 @@ import gym
 
 
 class Strategy(Enum):
+    RANDOM = 0
     ARGMAX = 1
     SOFTMAX = 2
     E_GREEDY = 3
     DECAY_E_GREEDY = 4
-    RANDOM = 0
 
 
 def discount_rewards(r):
@@ -28,9 +29,9 @@ def discount_rewards(r):
     return discounted_r
 
 
-def leaky_relu(x, alpha=0.01):
+def leaky_relu(x, alpha=5.5):
     """Leaky ReLU."""
-    return tf.maximum(alpha * x, x)
+    return tf.maximum(x / alpha, x)
 
 
 # Parameters
@@ -38,19 +39,21 @@ env = gym.make('CartPole-v0')
 input_size = env.observation_space.shape[0]
 output_size = env.action_space.n
 
-report_every_s = 2
+report_every_s = 10
 
 max_episodes = 5000  # Set total number of episodes to train agent on.
-max_steps = 1000
+max_steps = 500
 
-epsilon_decay = .99825
+epsilon = 0.4
+epsilon_decay = .9995
 gamma = 0.99
 lr = 0.01
 hidden_size = 10
 batch_size = 1
-strategy = Strategy.E_GREEDY
+# strategy = Strategy.E_GREEDY
+
 '''
-# Define the agent
+# Define the policy network
 '''
 # These lines established the feed-forward part of the network. The agent takes a state and produces an action.
 state_in = tf.placeholder(shape=[None, input_size], dtype=tf.float32)
@@ -83,28 +86,24 @@ update_batch = optimizer.apply_gradients(zip(gradient_holders, tvars))
 # Initialize TensorFlow graph
 init = tf.global_variables_initializer()
 
-i = 0
-total_reward = []
-total_length = []
-start_time = time.time()
-timer = time.time()
-show_result = False
-
 # Initialize variables for capturing results
 num_trials = 30
-epsilon_array = np.arange(0, 1, 0.1)
-results = np.zeros((num_trials, len(epsilon_array), 2))
+results = np.zeros((num_trials, len(Strategy), 3))
 
-for epsilon in epsilon_array:
+for strategy in Strategy:
     for trial in range(0, num_trials):
         # Launch the TensorFlow graph
         with tf.Session() as sess:
             sess.run(init)
+            start_time = time.time()
+            timer = time.time()
+            show_result = True
             # Initialize gradient buffer with zero
             gradBuffer = sess.run(tvars)
             for ix, grad in enumerate(gradBuffer):
                 gradBuffer[ix] = 0
-
+            total_reward = []
+            
             for i in range(max_episodes):
                 # Report status every report_every_s seconds
                 if time.time() - timer > report_every_s:
@@ -163,21 +162,16 @@ for epsilon in epsilon_array:
 
                         total_reward.append(running_reward)
                         break
-                        '''
-                    if show_result:
-                        env.render()
-            '''
+
                 # Update our running tally of scores.
                 if show_result:
-                    print("Epsilon: " + str(epsilon) + "; Trial: " + str(trial) + "; Iteration " + str(i) + ": " + str(np.mean(total_reward[-100:])), end="")
-                    if strategy == Strategy.DECAY_E_GREEDY:
-                        print("; epsilon: " + str(np.power(epsilon_decay, i)))
-                    else:
-                        print()
+                    print("Strategy: " + str(strategy.name) + "; Trial: " + str(trial) + "; Iteration " + str(i) + ": "
+                          + str(np.mean(total_reward[-100:])))
                     show_result = False
-                results[trial, np.where(epsilon_array == epsilon)[0][0]] = [i, time.time() - start_time]
+
+                results[trial, strategy.value, :] = [i, time.time() - start_time, np.mean(total_reward[-100:])]
                 # Print when task is completed
-                if np.mean(total_reward[-100:]) > 195:
+                if np.mean(total_reward[-100:]) > 195 and i > 100:
                     print("--- Task completed after: " + str(i) + " iterations in " + str(
                         int(time.time() - start_time)) + " seconds. ---")
                     break
@@ -185,15 +179,25 @@ for epsilon in epsilon_array:
 # Plot the results
 iterations = results[:, :, 0]
 time = results[:, :, 1]
+score = results[:, :, 2]
+
 iterations_df = pd.DataFrame(iterations)
 ax = sns.boxplot(iterations_df)
-ax.set(xlabel='epsilon', ylabel='No of iterations')
-ax.set_xticklabels(epsilon_array)
+ax.set(xlabel='Strategy', ylabel='No of iterations')
+ax.set_xticklabels([x.name for x in Strategy])
 ax.set_ylim(0,)
 sns.plt.show()
+
 time_df = pd.DataFrame(time)
 ax = sns.boxplot(time_df)
-ax.set(xlabel='epsilon', ylabel='No of seconds')
-ax.set_xticklabels(epsilon_array)
+ax.set(xlabel='Strategy', ylabel='No of seconds')
+ax.set_xticklabels([x.name for x in Strategy])
+ax.set_ylim(0,)
+sns.plt.show()
+
+score_df = pd.DataFrame(score)
+ax = sns.boxplot(score_df)
+ax.set(xlabel='Strategy', ylabel='Score')
+ax.set_xticklabels([x.name for x in Strategy])
 ax.set_ylim(0,)
 sns.plt.show()
