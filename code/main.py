@@ -44,13 +44,13 @@ report_every_s = 10
 max_episodes = 5000  # Set total number of episodes to train agent on.
 max_steps = 500
 
-epsilon = 0.4
+# epsilon = 0.4
 epsilon_decay = .9995
 gamma = 0.99
 lr = 0.01
 hidden_size = 10
 batch_size = 1
-# strategy = Strategy.E_GREEDY
+strategy = Strategy.E_GREEDY
 
 '''
 # Define the policy network
@@ -88,9 +88,10 @@ init = tf.global_variables_initializer()
 
 # Initialize variables for capturing results
 num_trials = 30
-results = np.zeros((num_trials, len(Strategy), 3))
+epsilon_array = np.arange(0, 1, 0.05)
+results = np.zeros((num_trials, len(epsilon_array), 3))
 
-for strategy in Strategy:
+for epsilon in epsilon_array:
     for trial in range(0, num_trials):
         # Launch the TensorFlow graph
         with tf.Session() as sess:
@@ -165,11 +166,11 @@ for strategy in Strategy:
 
                 # Update our running tally of scores.
                 if show_result:
-                    print("Strategy: " + str(strategy.name) + "; Trial: " + str(trial) + "; Iteration " + str(i) + ": "
+                    print("Epsilon: " + str(epsilon) + "; Trial: " + str(trial) + "; Iteration " + str(i) + ": "
                           + str(np.mean(total_reward[-100:])))
                     show_result = False
 
-                results[trial, strategy.value, :] = [i, time.time() - start_time, np.mean(total_reward[-100:])]
+                results[trial, np.where(epsilon_array == epsilon)[0][0], :] = [i, time.time() - start_time, np.mean(total_reward[-100:])]
                 # Print when task is completed
                 if np.mean(total_reward[-100:]) > 195 and i > 100:
                     print("--- Task completed after: " + str(i) + " iterations in " + str(
@@ -183,21 +184,21 @@ score = results[:, :, 2]
 
 iterations_df = pd.DataFrame(iterations)
 ax = sns.boxplot(iterations_df)
-ax.set(xlabel='Strategy', ylabel='No of iterations')
-ax.set_xticklabels([x.name for x in Strategy])
+ax.set(xlabel='Epsilon', ylabel='No of iterations')
+ax.set_xticklabels(epsilon_array)
 ax.set_ylim(0,)
 sns.plt.show()
 
 time_df = pd.DataFrame(time)
 ax = sns.boxplot(time_df)
-ax.set(xlabel='Strategy', ylabel='No of seconds')
-ax.set_xticklabels([x.name for x in Strategy])
+ax.set(xlabel='Epsilon', ylabel='No of seconds')
+ax.set_xticklabels(epsilon_array)
 ax.set_ylim(0,)
 sns.plt.show()
 
 score_df = pd.DataFrame(score)
 ax = sns.boxplot(score_df)
-ax.set(xlabel='Strategy', ylabel='Score')
-ax.set_xticklabels([x.name for x in Strategy])
+ax.set(xlabel='Epsilon', ylabel='Score')
+ax.set_xticklabels(epsilon_array)
 ax.set_ylim(0,)
 sns.plt.show()
