@@ -1,7 +1,7 @@
+import os
 import time
 from enum import Enum
-import os
-os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -29,27 +29,20 @@ def discount_rewards(r):
     return discounted_r
 
 
-def leaky_relu(x, alpha=5.5):
-    """Leaky ReLU."""
-    return tf.maximum(x / alpha, x)
-
-
 # Parameters
 env = gym.make('CartPole-v0')
 input_size = env.observation_space.shape[0]
 output_size = env.action_space.n
 
-report_every_s = 10
+report_every_s = 5
 
-max_episodes = 5000  # Set total number of episodes to train agent on.
+max_episodes = 1000  # Set total number of episodes to train agent on.
 max_steps = 500
 
-# epsilon = 0.4
-epsilon_decay = .9995
+epsilon = 0.3
+epsilon_decay = .99
 gamma = 0.99
-lr = 0.01
-hidden_size = 10
-batch_size = 1
+lr = 0.05
 strategy = Strategy.E_GREEDY
 
 '''
@@ -57,59 +50,50 @@ strategy = Strategy.E_GREEDY
 '''
 # These lines established the feed-forward part of the network. The agent takes a state and produces an action.
 state_in = tf.placeholder(shape=[None, input_size], dtype=tf.float32)
-hidden = slim.fully_connected(state_in, hidden_size, activation_fn=leaky_relu)
-output = slim.fully_connected(hidden, output_size, activation_fn=tf.nn.softmax,
+output = slim.fully_connected(state_in, output_size,
+                              activation_fn=tf.nn.softmax,
                               biases_initializer=None)
 
 '''
-# Training procedure. Compute the loss based on chosen action and reward and update the net accordingly.
+# Training procedure.
 '''
-reward_holder = tf.placeholder(shape=[None], dtype=tf.float32)
-action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
-
-indexes = tf.range(0, tf.shape(output)[0]) * tf.shape(output)[1] + action_holder
-responsible_outputs = tf.gather(tf.reshape(output, [-1]), indexes)
-
-loss = -tf.reduce_mean(tf.log(responsible_outputs) * reward_holder)
-
-tvars = tf.trainable_variables()
-gradient_holders = []
-for idx, var in enumerate(tvars):
-    placeholder = tf.placeholder(tf.float32, name=str(idx) + '_holder')
-    gradient_holders.append(placeholder)
-
-gradients = tf.gradients(loss, tvars)
-
 optimizer = tf.train.AdamOptimizer(learning_rate=lr)
-update_batch = optimizer.apply_gradients(zip(gradient_holders, tvars))
+action_holder = tf.placeholder(dtype=tf.int32)  # One-hot encoded vector
+return_holder = tf.placeholder(dtype=tf.float32)
+baseline = tf.constant(value=0, dtype=tf.float32)  # For improved variance this can be set to average expected return
+#  for the given state
 
-# Initialize TensorFlow graph
+# The network's predicted probability of the performed action
+network_prediction = tf.reduce_sum(tf.multiply(output, tf.one_hot(action_holder, env.action_space.n)), axis=1)
+log_probabilities = tf.log(network_prediction)
+# We need to maximize the function below, so minimize it's negative (optimizer only supports minimize)
+loss = -tf.reduce_sum(lr * tf.multiply(log_probabilities, (return_holder - baseline)))
+# Function below calculates the gradients of trainable variable given the above loss function as function to minimize
+optimize = optimizer.minimize(loss)  # Requires state_in = s, action_holder = a, reward_holder = r
+
+# Create an operation to initialize TensorFlow graph and variables
 init = tf.global_variables_initializer()
 
 # Initialize variables for capturing results
 num_trials = 30
-epsilon_array = np.arange(0, 1, 0.05)
-results = np.zeros((num_trials, len(epsilon_array), 3))
+results = np.zeros((num_trials, len(Strategy), 3))
 
-for epsilon in epsilon_array:
+for strategy in Strategy:
     for trial in range(0, num_trials):
         # Launch the TensorFlow graph
         with tf.Session() as sess:
-            sess.run(init)
+            sess.run(init)  # Initialize graph and variables
             start_time = time.time()
-            timer = time.time()
+            timer = start_time
             show_result = True
-            # Initialize gradient buffer with zero
-            gradBuffer = sess.run(tvars)
-            for ix, grad in enumerate(gradBuffer):
-                gradBuffer[ix] = 0
             total_reward = []
-            
+
             for i in range(max_episodes):
                 # Report status every report_every_s seconds
                 if time.time() - timer > report_every_s:
                     timer = time.time()
                     show_result = True
+
                 s = env.reset()
                 running_reward = 0
                 ep_history = []
@@ -138,43 +122,33 @@ for epsilon in epsilon_array:
                         # Random
                         a = env.action_space.sample()
 
-                    s1, r, d, _ = env.step(a)
-                    ep_history.append([s, a, r, s1])
-                    s = s1
+                    s_new, r, d, _ = env.step(a)
+                    ep_history.append([s, a, r, s_new])
+                    s = s_new
                     running_reward += r
                     if d:
-                        # Update the network.
+                        # Update the network using discounted reward as Q-value
                         ep_history = np.array(ep_history)
                         ep_history[:, 2] = discount_rewards(ep_history[:, 2])
-                        feed_dict = {reward_holder: ep_history[:, 2],
-                                     action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
-                        grads = sess.run(gradients, feed_dict=feed_dict)
-                        for idx, grad in enumerate(grads):
-                            gradBuffer[idx] += grad
 
-                        # Collect a batch of episodes and get an average gradient out of these
-                        if i % batch_size == 0 and i != 0:
-                            # Average buffer over batch size
-                            gradBuffer[:] = [x / batch_size for x in gradBuffer]
-                            feed_dict = dict(zip(gradient_holders, gradBuffer))
-                            _ = sess.run(update_batch, feed_dict=feed_dict)
-                            for ix, grad in enumerate(gradBuffer):
-                                gradBuffer[ix] = grad * 0
-
+                        feed_dict = {return_holder: ep_history[:, 2],
+                                     action_holder: ep_history[:, 1],
+                                     state_in: np.vstack(ep_history[:, 0])}
+                        grads = sess.run(optimize, feed_dict=feed_dict)
                         total_reward.append(running_reward)
                         break
 
                 # Update our running tally of scores.
                 if show_result:
-                    print("Epsilon: " + str(epsilon) + "; Trial: " + str(trial) + "; Iteration " + str(i) + ": "
-                          + str(np.mean(total_reward[-100:])))
+                    print("Strategy: " + str(strategy.name) + "; Trial: " + str(trial) + "; Iteration " + str(i) +
+                          ": " + str(np.mean(total_reward[-100:])))
                     show_result = False
 
-                results[trial, np.where(epsilon_array == epsilon)[0][0], :] = [i, time.time() - start_time, np.mean(total_reward[-100:])]
+                results[trial, strategy.value, :] = [i, time.time() - start_time, np.mean(total_reward[-100:])]
                 # Print when task is completed
                 if np.mean(total_reward[-100:]) > 195 and i > 100:
-                    print("--- Task completed after: " + str(i) + " iterations in " + str(
-                        int(time.time() - start_time)) + " seconds. ---")
+                    print("--- Task completed after: " + str(i) + " iterations in " + str(int(time.time() - start_time))
+                          + " seconds. ---")
                     break
 
 # Plot the results
@@ -184,21 +158,21 @@ score = results[:, :, 2]
 
 iterations_df = pd.DataFrame(iterations)
 ax = sns.boxplot(iterations_df)
-ax.set(xlabel='Epsilon', ylabel='No of iterations')
-ax.set_xticklabels(epsilon_array)
+ax.set(xlabel='Strategy', ylabel='No of iterations')
+ax.set_xticklabels(x.name for x in Strategy)
 ax.set_ylim(0,)
 sns.plt.show()
 
 time_df = pd.DataFrame(time)
 ax = sns.boxplot(time_df)
-ax.set(xlabel='Epsilon', ylabel='No of seconds')
-ax.set_xticklabels(epsilon_array)
+ax.set(xlabel='Strategy', ylabel='No of seconds')
+ax.set_xticklabels(x.name for x in Strategy)
 ax.set_ylim(0,)
 sns.plt.show()
 
 score_df = pd.DataFrame(score)
 ax = sns.boxplot(score_df)
-ax.set(xlabel='Epsilon', ylabel='Score')
-ax.set_xticklabels(epsilon_array)
+ax.set(xlabel='Strategy', ylabel='Score')
+ax.set_xticklabels(x.name for x in Strategy)
 ax.set_ylim(0,)
 sns.plt.show()
